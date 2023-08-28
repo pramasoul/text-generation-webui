@@ -55,20 +55,25 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_sse(self, chunk: dict):
         response = 'data: ' + json.dumps(chunk) + '\r\n\r\n'
-        debug_msg(response)
+        debug_msg(response[:-4])
         self.wfile.write(response.encode('utf-8'))
 
     def end_sse(self):
-        self.wfile.write('data: [DONE]\r\n\r\n'.encode('utf-8'))
+        response = 'data: [DONE]\r\n\r\n'
+        debug_msg(response[:-4])
+        self.wfile.write(response.encode('utf-8'))
 
     def return_json(self, ret: dict, code: int = 200, no_debug=False):
         self.send_response(code)
         self.send_access_control_headers()
         self.send_header('Content-Type', 'application/json')
-        self.end_headers()
 
         response = json.dumps(ret)
         r_utf8 = response.encode('utf-8')
+
+        self.send_header('Content-Length', str(len(r_utf8)))
+        self.end_headers()
+
         self.wfile.write(r_utf8)
         if not no_debug:
             debug_msg(r_utf8)
@@ -84,6 +89,7 @@ class Handler(BaseHTTPRequestHandler):
             }
         }
         if internal_message:
+            print(error_type, message)
             print(internal_message)
             # error_resp['internal_message'] = internal_message
 
@@ -93,12 +99,10 @@ class Handler(BaseHTTPRequestHandler):
         def wrapper(self):
             try:
                 func(self)
-            except ServiceUnavailableError as e:
-                self.openai_error(e.message, e.code, e.error_type, internal_message=e.internal_message)
             except InvalidRequestError as e:
-                self.openai_error(e.message, e.code, e.error_type, e.param, internal_message=e.internal_message)
+                self.openai_error(e.message, e.code, e.__class__.__name__, e.param, internal_message=e.internal_message)
             except OpenAIError as e:
-                self.openai_error(e.message, e.code, e.error_type, internal_message=e.internal_message)
+                self.openai_error(e.message, e.code, e.__class__.__name__, internal_message=e.internal_message)
             except Exception as e:
                 self.openai_error(repr(e), 500, 'OpenAIError', internal_message=traceback.format_exc())
 
@@ -119,7 +123,7 @@ class Handler(BaseHTTPRequestHandler):
                 resp = OAImodels.list_models(is_legacy)
             else:
                 model_name = self.path[len('/v1/models/'):]
-                resp = OAImodels.model_info()
+                resp = OAImodels.model_info(model_name)
 
             self.return_json(resp)
 
@@ -143,8 +147,7 @@ class Handler(BaseHTTPRequestHandler):
         if '/completions' in self.path or '/generate' in self.path:
 
             if not shared.model:
-                self.openai_error("No model loaded.")
-                return
+                raise ServiceUnavailableError("No model loaded.")
 
             is_legacy = '/generate' in self.path
             is_streaming = body.get('stream', False)
@@ -176,8 +179,7 @@ class Handler(BaseHTTPRequestHandler):
             # deprecated
 
             if not shared.model:
-                self.openai_error("No model loaded.")
-                return
+                raise ServiceUnavailableError("No model loaded.")
 
             req_params = get_default_req_params()
 
@@ -190,7 +192,10 @@ class Handler(BaseHTTPRequestHandler):
 
             self.return_json(response)
 
-        elif '/images/generations' in self.path and 'SD_WEBUI_URL' in os.environ:
+        elif '/images/generations' in self.path:
+            if not 'SD_WEBUI_URL' in os.environ:
+                raise ServiceUnavailableError("Stable Diffusion not available. SD_WEBUI_URL not set.")
+
             prompt = body['prompt']
             size = default(body, 'size', '1024x1024')
             response_format = default(body, 'response_format', 'url')  # or b64_json
@@ -256,11 +261,11 @@ def run_server():
         try:
             from flask_cloudflared import _run_cloudflared
             public_url = _run_cloudflared(params['port'], params['port'] + 1)
-            print(f'Starting OpenAI compatible api at\nOPENAI_API_BASE={public_url}/v1')
+            print(f'OpenAI compatible API ready at: OPENAI_API_BASE={public_url}/v1')
         except ImportError:
             print('You should install flask_cloudflared manually')
     else:
-        print(f'Starting OpenAI compatible api:\nOPENAI_API_BASE=http://{server_addr[0]}:{server_addr[1]}/v1')
+        print(f'OpenAI compatible API ready at: OPENAI_API_BASE=http://{server_addr[0]}:{server_addr[1]}/v1')
 
     server.serve_forever()
 
